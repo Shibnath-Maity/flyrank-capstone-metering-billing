@@ -12,8 +12,15 @@ const testPaymentRoutes = require("./routes/testPaymentRoutes");
 const webhookRoutes = require("./routes/webhookRoutes");
 
 const app = express();
+
 app.use(
     helmet({
+        // Fixes Razorpay Netbanking/UPI blank-popup issue.
+        // Helmet v5+ sets Cross-Origin-Opener-Policy: same-origin by default,
+        // which isolates the popup window Razorpay's checkout-frame.js opens
+        // for Netbanking, so it can no longer write content into it.
+        crossOriginOpenerPolicy: { policy: "unsafe-none" },
+
         contentSecurityPolicy: {
             directives: {
                 defaultSrc: ["'self'"],
@@ -51,15 +58,34 @@ app.use(
         }
     })
 );
+
 app.use(cors());
+
 app.use(express.static("public"));
 
-app.use("/api/webhooks", webhookRoutes);
+/*
+ * Razorpay webhook
+ *
+ * IMPORTANT:
+ * The webhook must receive the raw request body
+ * because Razorpay signature verification uses
+ * the exact raw body.
+ */
+app.use(
+    "/api/webhooks",
+    express.raw({
+        type: "application/json"
+    }),
+    webhookRoutes
+);
 
+// Normal JSON requests
 app.use(express.json());
 
 app.use(morgan("dev"));
+
 app.use("/api", testPaymentRoutes);
+
 app.get("/health", (req, res) => {
     res.status(200).json({
         success: true,

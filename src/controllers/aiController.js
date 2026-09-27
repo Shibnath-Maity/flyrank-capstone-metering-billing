@@ -2,8 +2,10 @@ const MeterService = require("../services/meterService");
 
 const generateAI = async (req, res) => {
     try {
+        // Tenant comes from the authenticated API key.
+        const tenantId = req.tenantId;
+
         const {
-            tenantId,
             idempotencyKey,
             inputTokens = 0,
             cachedInputTokens = 0,
@@ -12,9 +14,9 @@ const generateAI = async (req, res) => {
         } = req.body;
 
         if (!tenantId) {
-            return res.status(400).json({
+            return res.status(401).json({
                 success: false,
-                message: "tenantId is required"
+                message: "Tenant authentication required"
             });
         }
 
@@ -25,28 +27,28 @@ const generateAI = async (req, res) => {
             });
         }
 
-        const quantity =
-            inputTokens +
-            cachedInputTokens +
-            outputTokens +
-            reasoningTokens;
+        const totalTokens =
+            Number(inputTokens) +
+            Number(cachedInputTokens) +
+            Number(outputTokens) +
+            Number(reasoningTokens);
 
-        if (quantity <= 0) {
+        if (totalTokens <= 0) {
             return res.status(400).json({
                 success: false,
-                message: "At least one token count must be greater than 0"
+                message: "At least one token count is required"
             });
         }
 
         const result = await MeterService.recordUsage({
             tenantId,
             type: "AI_TOKENS",
-            quantity,
+            quantity: totalTokens,
             idempotencyKey,
-            inputTokens,
-            cachedInputTokens,
-            outputTokens,
-            reasoningTokens
+            inputTokens: Number(inputTokens),
+            cachedInputTokens: Number(cachedInputTokens),
+            outputTokens: Number(outputTokens),
+            reasoningTokens: Number(reasoningTokens)
         });
 
         return res.status(200).json({
@@ -59,7 +61,6 @@ const generateAI = async (req, res) => {
         });
 
     } catch (error) {
-
         if (error.code === "PAYMENT_REQUIRED") {
             return res.status(402).json({
                 success: false,

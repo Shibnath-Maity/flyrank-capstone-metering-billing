@@ -1,6 +1,5 @@
 const Tenant = require("../models/Tenant");
 const Plan = require("../models/Plan");
-const Subscription = require("../models/Subscription");
 const PaymentService = require("../services/paymentService");
 
 const createCheckout = async (req, res) => {
@@ -14,6 +13,7 @@ const createCheckout = async (req, res) => {
             });
         }
 
+        // Check that the tenant exists
         const tenant = await Tenant.findById(tenantId);
 
         if (!tenant) {
@@ -23,6 +23,7 @@ const createCheckout = async (req, res) => {
             });
         }
 
+        // Find Pro plan
         const proPlan = await Plan.findOne({
             name: "Pro"
         });
@@ -34,41 +35,46 @@ const createCheckout = async (req, res) => {
             });
         }
 
-        const subscription = await Subscription.findOne({
-            tenantId,
-            status: "active"
-        });
+        // Create Razorpay order
+        // No active subscription is required here.
+        // Subscription will be created/activated
+        // after successful payment through webhook.
 
-        if (!subscription) {
-            return res.status(404).json({
-                success: false,
-                message: "Active subscription not found"
+        const receipt =
+            `tenant_${tenantId}_${Date.now()}`;
+
+        const order =
+            await PaymentService.createOrder({
+                amountInMinorUnits:
+                    proPlan.priceInMinorUnits,
+
+                receipt,
+
+                notes: {
+                    tenantId: tenantId.toString(),
+                    planId: proPlan._id.toString()
+                }
             });
-        }
 
-        const receipt = `tenant_${tenantId}_${Date.now()}`;
-const order = await PaymentService.createOrder({
-    amountInMinorUnits: proPlan.priceInMinorUnits,
-    receipt,
-    notes: {
-        tenantId: tenantId.toString(),
-        planId: proPlan._id.toString()
-    }
-});
-        
         return res.status(200).json({
             success: true,
             message: "Checkout order created",
+
             order: {
                 id: order.id,
                 amount: order.amount,
                 currency: order.currency
             },
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID
+
+            razorpayKeyId:
+                process.env.RAZORPAY_KEY_ID
         });
 
     } catch (error) {
-        console.error("Checkout error:", error);
+        console.error(
+            "Checkout error:",
+            error
+        );
 
         return res.status(500).json({
             success: false,

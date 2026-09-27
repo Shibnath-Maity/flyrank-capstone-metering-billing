@@ -2,12 +2,15 @@ const MeterService = require("../services/meterService");
 
 const generate = async (req, res) => {
     try {
-        const { tenantId, idempotencyKey } = req.body;
+        // Tenant comes from the authenticated API key.
+        const tenantId = req.tenantId;
+
+        const { idempotencyKey } = req.body;
 
         if (!tenantId) {
-            return res.status(400).json({
+            return res.status(401).json({
                 success: false,
-                message: "tenantId is required"
+                message: "Tenant authentication required"
             });
         }
 
@@ -49,7 +52,7 @@ const generate = async (req, res) => {
             });
         }
 
-        console.error(error);
+        console.error("Generate error:", error);
 
         return res.status(500).json({
             success: false,

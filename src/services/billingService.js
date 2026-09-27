@@ -1,12 +1,12 @@
 const RazorpayProvider = require("./payment/razorpayProvider");
 
-class PaymentService {
+class BillingService {
 
     constructor() {
         this.paymentProvider = new RazorpayProvider();
     }
 
-    async createOrder({
+    async createCheckout({
         amountInMinorUnits,
         receipt,
         notes
@@ -23,4 +23,4 @@ class PaymentService {
     }
 }
 
-module.exports = new PaymentService();
+module.exports = new BillingService();

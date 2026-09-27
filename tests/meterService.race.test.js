@@ -13,8 +13,9 @@
  *   3. A UsageCounter document is created on-demand for a tenant's
  *      first request in a month.
  *
- * NOTE: This connects to a separate MongoDB database
- * (flyrank_metering_test) so development data is not affected.
+ * NOTE:
+ * This test suite uses its own dedicated MongoDB database so it
+ * cannot interfere with the API test suite or development database.
  */
 
 const mongoose = require("mongoose");
@@ -26,11 +27,11 @@ const UsageEvent = require("../src/models/UsageEvent");
 const UsageCounter = require("../src/models/UsageCounter");
 const MeterService = require("../src/services/meterService");
 
-// Use 127.0.0.1 rather than "localhost".
-// On Windows, Node can try IPv6 first and cause connection delays.
+// Dedicated database for race-condition tests.
+// This is intentionally different from the API test database.
 const TEST_MONGO_URI =
-    process.env.TEST_MONGO_URI ||
-    "mongodb://127.0.0.1:27017/flyrank_metering_test";
+    process.env.RACE_TEST_MONGO_URI ||
+    "mongodb://127.0.0.1:27017/flyrank_metering_race_test";
 
 let tenant;
 let plan;
@@ -47,7 +48,7 @@ afterAll(async () => {
 }, 20000);
 
 beforeEach(async () => {
-    // Clean slate for every test
+    // Clean slate for every test.
     await Promise.all([
         Tenant.deleteMany({}),
         Plan.deleteMany({}),
@@ -56,11 +57,13 @@ beforeEach(async () => {
         UsageCounter.deleteMany({})
     ]);
 
+    // Create test tenant.
     tenant = await Tenant.create({
         name: "Race Test Tenant",
         email: `race-${Date.now()}@example.com`
     });
 
+    // Create test plan with a small quota.
     plan = await Plan.create({
         name: "RACE_TEST_PLAN",
         monthlyApiCalls: QUOTA,
@@ -68,6 +71,7 @@ beforeEach(async () => {
         priceInMinorUnits: 0
     });
 
+    // Give the tenant an active subscription.
     await Subscription.create({
         tenantId: tenant._id,
         planId: plan._id,
@@ -121,24 +125,41 @@ describe("MeterService — quota cannot be exceeded under concurrency", () => {
                         quantity: 1,
                         idempotencyKey: `race-key-${i}`
                     }).then(
-                        (res) => ({ ok: true, res }),
-                        (err) => ({ ok: false, err })
+                        (res) => ({
+                            ok: true,
+                            res
+                        }),
+                        (err) => ({
+                            ok: false,
+                            err
+                        })
                     )
             );
 
             const settled = await Promise.all(requests);
 
-            const succeeded = settled.filter((r) => r.ok);
-            const rejected = settled.filter((r) => !r.ok);
+            const succeeded = settled.filter(
+                (r) => r.ok
+            );
 
+            const rejected = settled.filter(
+                (r) => !r.ok
+            );
+
+            // Exactly QUOTA requests should succeed.
             expect(succeeded.length).toBe(QUOTA);
+
+            // Remaining requests should be rejected.
             expect(rejected.length).toBe(
                 CONCURRENCY - QUOTA
             );
 
+            // Every rejected request must be a quota error.
             for (const r of rejected) {
                 expect(r.err.statusCode).toBe(429);
-                expect(r.err.code).toBe("QUOTA_EXCEEDED");
+                expect(r.err.code).toBe(
+                    "QUOTA_EXCEEDED"
+                );
             }
 
             // Counter must never exceed the quota.
@@ -146,12 +167,14 @@ describe("MeterService — quota cannot be exceeded under concurrency", () => {
                 tenantId: tenant._id
             });
 
+            expect(counter).not.toBeNull();
             expect(counter.apiCalls).toBe(QUOTA);
 
             // Exactly QUOTA usage events should be persisted.
-            const eventCount = await UsageEvent.countDocuments({
-                tenantId: tenant._id
-            });
+            const eventCount =
+                await UsageEvent.countDocuments({
+                    tenantId: tenant._id
+                });
 
             expect(eventCount).toBe(QUOTA);
         }
@@ -172,26 +195,38 @@ describe("MeterService — quota cannot be exceeded under concurrency", () => {
                         quantity: 1,
                         idempotencyKey: sharedKey
                     }).then(
-                        (res) => ({ ok: true, res }),
-                        (err) => ({ ok: false, err })
+                        (res) => ({
+                            ok: true,
+                            res
+                        }),
+                        (err) => ({
+                            ok: false,
+                            err
+                        })
                     )
             );
 
-            const settled = await Promise.all(requests);
+            const settled = await Promise.all(
+                requests
+            );
 
-            // All requests represent the same idempotent request.
-            // None should receive 429.
-            const failed = settled.filter((r) => !r.ok);
+            // All requests represent the same
+            // idempotent operation.
+            // None should receive an error.
+            const failed = settled.filter(
+                (r) => !r.ok
+            );
 
             expect(failed.length).toBe(0);
 
-            // Exactly one request creates the UsageEvent.
+            // Exactly one request creates the event.
             const originals = settled.filter(
                 (r) =>
                     r.ok &&
                     r.res.duplicate === false
             );
 
+            // All remaining requests should be duplicates.
             const duplicates = settled.filter(
                 (r) =>
                     r.ok &&
@@ -199,23 +234,27 @@ describe("MeterService — quota cannot be exceeded under concurrency", () => {
             );
 
             expect(originals.length).toBe(1);
+
             expect(duplicates.length).toBe(
                 CONCURRENCY - 1
             );
 
             // Exactly one UsageEvent should exist.
-            const eventCount = await UsageEvent.countDocuments({
-                tenantId: tenant._id,
-                idempotencyKey: sharedKey
-            });
+            const eventCount =
+                await UsageEvent.countDocuments({
+                    tenantId: tenant._id,
+                    idempotencyKey: sharedKey
+                });
 
             expect(eventCount).toBe(1);
 
             // Counter must reflect only ONE reservation.
-            const counter = await UsageCounter.findOne({
-                tenantId: tenant._id
-            });
+            const counter =
+                await UsageCounter.findOne({
+                    tenantId: tenant._id
+                });
 
+            expect(counter).not.toBeNull();
             expect(counter.apiCalls).toBe(1);
         }
     );
@@ -236,7 +275,8 @@ describe(
                             tenantId: tenant._id,
                             type: "AI_TOKENS",
                             quantity: 1,
-                            idempotencyKey: `ai-race-key-${i}`,
+                            idempotencyKey:
+                                `ai-race-key-${i}`,
                             inputTokens: 1,
                             outputTokens: 0
                         }).then(
@@ -255,22 +295,58 @@ describe(
                     requests
                 );
 
-                const succeeded = settled.filter(
-                    (r) => r.ok
-                );
+                const succeeded =
+                    settled.filter(
+                        (r) => r.ok
+                    );
 
+                const rejected =
+                    settled.filter(
+                        (r) => !r.ok
+                    );
+
+                // Exactly QUOTA AI token requests
+                // should succeed.
                 expect(succeeded.length).toBe(
                     QUOTA
                 );
+
+                // Remaining requests should fail.
+                expect(rejected.length).toBe(
+                    CONCURRENCY - QUOTA
+                );
+
+                // Every rejected request should be
+                // a quota error.
+                for (const r of rejected) {
+                    expect(r.err.statusCode).toBe(
+                        429
+                    );
+
+                    expect(r.err.code).toBe(
+                        "QUOTA_EXCEEDED"
+                    );
+                }
 
                 const counter =
                     await UsageCounter.findOne({
                         tenantId: tenant._id
                     });
 
+                expect(counter).not.toBeNull();
+
                 expect(counter.aiTokens).toBe(
                     QUOTA
                 );
+
+                // Exactly QUOTA AI usage events.
+                const eventCount =
+                    await UsageEvent.countDocuments({
+                        tenantId: tenant._id,
+                        type: "AI_TOKENS"
+                    });
+
+                expect(eventCount).toBe(QUOTA);
             }
         );
     }

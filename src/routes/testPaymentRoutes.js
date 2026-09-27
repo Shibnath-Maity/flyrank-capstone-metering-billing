@@ -1,11 +1,9 @@
 const express = require("express");
-
-const {
-    simulatePayment
-} = require("../controllers/testPaymentController");
-
 const router = express.Router();
 
-router.post("/test-payment", simulatePayment);
+const apiKeyAuth = require("../middleware/apiKeyAuth");
+const { generate } = require("../controllers/generateController");
+
+router.post("/generate", apiKeyAuth, generate);
 
 module.exports = router;

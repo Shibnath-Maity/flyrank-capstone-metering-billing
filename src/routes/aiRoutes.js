@@ -1,9 +1,9 @@
 const express = require("express");
-
-const { generateAI } = require("../controllers/aiController");
-
 const router = express.Router();
 
-router.post("/ai/generate", generateAI);
+const apiKeyAuth = require("../middleware/apiKeyAuth");
+const { generateAI } = require("../controllers/aiController");
+
+router.post("/ai/generate", apiKeyAuth, generateAI);
 
 module.exports = router;

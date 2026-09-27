@@ -1,17 +1,15 @@
 const PaymentEvent = require("../models/PaymentEvent");
 const Subscription = require("../models/Subscription");
 const Plan = require("../models/Plan");
-const razorpay = require("../config/razorpay");
+
+const PaymentService = require("../services/paymentService");
 
 const {
     verifyRazorpaySignature
 } = require("../services/webhookService");
 
-
 const handleRazorpayWebhook = async (req, res) => {
-
     try {
-
         // 1. Get Razorpay signature
         const signature =
             req.headers["x-razorpay-signature"];
@@ -22,7 +20,6 @@ const handleRazorpayWebhook = async (req, res) => {
                 message: "Missing Razorpay signature"
             });
         }
-
 
         // 2. Verify webhook signature
         const isValid = verifyRazorpaySignature(
@@ -37,19 +34,22 @@ const handleRazorpayWebhook = async (req, res) => {
             });
         }
 
-
         // 3. Convert raw body to JSON
         const payload =
             JSON.parse(req.body.toString());
 
-
         // 4. Get event information
-        const eventId =
-            req.headers["x-razorpay-event-id"] ||
-            payload?.payload?.payment?.entity?.id;
-
         const eventType = payload.event;
 
+        const paymentEntityId =
+            payload?.payload?.payment?.entity?.id;
+
+        // Combine event type with the payment entity id so distinct
+        // event types (e.g. "payment.captured" vs "order.paid") for the
+        // same payment aren't treated as duplicates of each other.
+        const eventId = paymentEntityId
+            ? `${eventType}_${paymentEntityId}`
+            : req.headers["x-razorpay-event-id"];
 
         if (!eventId) {
             return res.status(400).json({
@@ -58,143 +58,125 @@ const handleRazorpayWebhook = async (req, res) => {
             });
         }
 
-
         // 5. Check duplicate webhook
         const existingEvent =
             await PaymentEvent.findOne({
+                provider: "razorpay",
                 eventId
             });
 
-
         if (existingEvent) {
-
             return res.status(200).json({
                 success: true,
                 duplicate: true,
                 message: "Webhook already processed"
             });
-
         }
 
-
-        // 6. Save webhook event
-        await PaymentEvent.create({
-            provider: "razorpay",
-            eventId,
-            eventType
-        });
-
-
-        // 7. Process successful payment
+        // 6. Process successful payment
         if (
             eventType === "payment.captured" ||
             eventType === "order.paid"
         ) {
-
             const payment =
                 payload?.payload?.payment?.entity;
 
             const orderId =
                 payment?.order_id;
 
-
-            if (orderId) {
-
-                console.log(
-                    `Payment successful for order ${orderId}`
-                );
-
-
-                // 8. Fetch order from Razorpay
-                const order =
-                    await razorpay.orders.fetch(orderId);
-
-
-                // 9. Get tenant and plan from order notes
-                const tenantId =
-                    order.notes?.tenantId;
-
-                const planId =
-                    order.notes?.planId;
-
-
-                if (!tenantId || !planId) {
-
-                    return res.status(400).json({
-                        success: false,
-                        message:
-                            "Tenant information missing from order"
-                    });
-
-                }
-
-
-                // 10. Find subscription
-                const subscription =
-                    await Subscription.findOne({
-                        tenantId,
-                        status: "active"
-                    });
-
-
-                if (!subscription) {
-
-                    return res.status(404).json({
-                        success: false,
-                        message:
-                            "Active subscription not found"
-                    });
-
-                }
-
-
-                // 11. Find plan
-                const plan =
-                    await Plan.findById(planId);
-
-
-                if (!plan) {
-
-                    return res.status(404).json({
-                        success: false,
-                        message:
-                            "Plan not found"
-                    });
-
-                }
-
-
-                // 12. Upgrade subscription
-                subscription.planId =
-                    plan._id;
-
-                subscription.provider =
-                    "razorpay";
-
-                subscription.providerSubscriptionId =
-                    orderId;
-
-
-                await subscription.save();
-
-
-                console.log(
-                    `Tenant ${tenantId} upgraded to ${plan.name}`
-                );
-
+            if (!orderId) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Order ID missing from payment"
+                });
             }
 
+            console.log(
+                `Payment successful for order ${orderId}`
+            );
+
+            // 7. Fetch Razorpay order
+            const order =
+                await PaymentService.getOrder(orderId);
+
+            // 8. Get tenant and plan from order notes
+            const tenantId =
+                order.notes?.tenantId;
+
+            const planId =
+                order.notes?.planId;
+
+            if (!tenantId || !planId) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "Tenant information missing from order"
+                });
+            }
+
+            // 9. Find plan
+            const plan =
+                await Plan.findById(planId);
+
+            if (!plan) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Plan not found"
+                });
+            }
+
+            // 10. Create or activate subscription
+            const subscription =
+                await Subscription.findOneAndUpdate(
+                    {
+                        tenantId
+                    },
+                    {
+                        tenantId,
+                        planId: plan._id,
+                        status: "active",
+                        provider: "razorpay",
+                        providerSubscriptionId: orderId
+                    },
+                    {
+                        upsert: true,
+                        new: true
+                    }
+                );
+
+            console.log(
+                `Tenant ${tenantId} subscribed to ${plan.name}`
+            );
+
+            console.log(
+                `Subscription ${subscription._id} activated`
+            );
         }
 
+        // 11. Save webhook event
+        await PaymentEvent.create({
+            provider: "razorpay",
+            eventId,
+            eventType,
+            processedAt: new Date()
+        });
 
-        // 13. Success response
+        // 12. Success response
         return res.status(200).json({
             success: true,
             message: "Webhook processed"
         });
 
-
     } catch (error) {
+
+        // Concurrent duplicate webhook
+        if (error.code === 11000) {
+            return res.status(200).json({
+                success: true,
+                duplicate: true,
+                message: "Webhook already processed"
+            });
+        }
 
         console.error(
             "Webhook error:",
@@ -205,10 +187,8 @@ const handleRazorpayWebhook = async (req, res) => {
             success: false,
             message: "Webhook processing failed"
         });
-
     }
 };
-
 
 module.exports = {
     handleRazorpayWebhook
