@@ -55,6 +55,9 @@ const usageEventSchema = new mongoose.Schema(
         timestamps: true
     }
 );
+
+// Ensures the same idempotency key cannot be
+// recorded twice for the same tenant.
 usageEventSchema.index(
     {
         tenantId: 1,
@@ -64,5 +67,13 @@ usageEventSchema.index(
         unique: true
     }
 );
+
+// Optimizes monthly usage rollup queries
+// based on createdAt and tenant.
+usageEventSchema.index({
+    createdAt: 1,
+    tenantId: 1,
+    type: 1
+});
 
 module.exports = mongoose.model("UsageEvent", usageEventSchema);

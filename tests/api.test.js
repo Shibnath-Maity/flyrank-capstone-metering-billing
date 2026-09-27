@@ -385,4 +385,180 @@ describe("API Usage Metering", () => {
             expect(tenantBEvents).toBe(0);
         }
     );
+
+    test(
+        "returns current month usage summary",
+        async () => {
+            // Create one API usage event.
+            const apiResponse = await request(app)
+                .post("/api/generate")
+                .set("X-API-Key", apiKey.key)
+                .send({
+                    idempotencyKey:
+                        `summary-api-${Date.now()}`
+                });
+
+            expect(apiResponse.statusCode).toBe(200);
+
+            // Create one AI usage event.
+            const aiResponse = await request(app)
+                .post("/api/ai/generate")
+                .set("X-API-Key", apiKey.key)
+                .send({
+                    idempotencyKey:
+                        `summary-ai-${Date.now()}`,
+                    inputTokens: 1000,
+                    cachedInputTokens: 0,
+                    outputTokens: 1000,
+                    reasoningTokens: 0
+                });
+
+            expect(aiResponse.statusCode).toBe(200);
+
+            // Request usage summary.
+            const response = await request(app)
+                .get("/api/usage/summary")
+                .set("X-API-Key", apiKey.key);
+
+            expect(response.statusCode).toBe(200);
+            expect(response.body.success).toBe(true);
+
+            // Verify month format.
+            expect(response.body.month).toMatch(
+                /^\d{4}-\d{2}$/
+            );
+
+            // Verify plan.
+            expect(response.body.plan).toBe(
+                "FREE_TEST_PLAN"
+            );
+
+            // Verify usage.
+            expect(response.body.usage).toBeDefined();
+
+            expect(
+                response.body.usage.apiCalls
+            ).toBeGreaterThanOrEqual(1);
+
+            expect(
+                response.body.usage.aiTokens
+            ).toBeGreaterThanOrEqual(2000);
+
+            // Verify limits.
+            expect(response.body.limits).toBeDefined();
+
+            expect(
+                response.body.limits.apiCalls
+            ).toBe(1000);
+
+            expect(
+                response.body.limits.aiTokens
+            ).toBe(100000);
+
+            // Verify cost section.
+            expect(response.body.cost).toBeDefined();
+
+            expect(
+                response.body.cost.aiCostInCents
+            ).toBeGreaterThanOrEqual(0);
+        }
+    );
+    test(
+    "returns 401 when checkout is requested without API key",
+    async () => {
+        const response = await request(app)
+            .post("/api/billing/checkout")
+            .send({});
+
+        expect(response.statusCode).toBe(401);
+        expect(response.body.success).toBe(false);
+        expect(response.body.message).toBe(
+            "API key is required"
+        );
+    }
+);
+test(
+    "creates checkout order for authenticated tenant",
+    async () => {
+        const PaymentService = require(
+            "../src/services/paymentService"
+        );
+
+        const originalCreateOrder =
+            PaymentService.createOrder;
+
+        // Create the Pro plan expected by the controller.
+        const proPlan = await Plan.create({
+            name: "Pro",
+            monthlyApiCalls: 10000,
+            monthlyAiTokens: 1000000,
+            priceInMinorUnits: 99900
+        });
+
+        PaymentService.createOrder = jest
+            .fn()
+            .mockResolvedValue({
+                id: "order_test_checkout",
+                amount: proPlan.priceInMinorUnits,
+                currency: "INR"
+            });
+
+        try {
+            const response = await request(app)
+                .post("/api/billing/checkout")
+                .set("X-API-Key", apiKey.key)
+                .send({});
+
+            expect(response.statusCode).toBe(200);
+
+            expect(response.body.success).toBe(true);
+
+            expect(response.body.message).toBe(
+                "Checkout order created"
+            );
+
+            expect(response.body.order).toBeDefined();
+
+            expect(response.body.order.id).toBe(
+                "order_test_checkout"
+            );
+
+            expect(response.body.order.amount).toBe(
+                proPlan.priceInMinorUnits
+            );
+
+            expect(response.body.order.currency).toBe(
+                "INR"
+            );
+
+            expect(
+                response.body.razorpayKeyId
+            ).toBeDefined();
+
+            expect(
+                PaymentService.createOrder
+            ).toHaveBeenCalledTimes(1);
+
+            const call =
+                PaymentService.createOrder.mock.calls[0][0];
+
+            expect(
+                call.amountInMinorUnits
+            ).toBe(proPlan.priceInMinorUnits);
+
+            expect(call.notes).toBeDefined();
+
+            expect(call.notes.tenantId).toBe(
+                tenant._id.toString()
+            );
+
+            expect(call.notes.planId).toBe(
+                proPlan._id.toString()
+            );
+        } finally {
+            PaymentService.createOrder =
+                originalCreateOrder;
+        }
+    }
+);
 });

@@ -4,7 +4,7 @@ const PaymentService = require("../services/paymentService");
 
 const createCheckout = async (req, res) => {
     try {
-        const { tenantId } = req.body;
+        const tenantId = req.tenantId;
 
         if (!tenantId) {
             return res.status(400).json({

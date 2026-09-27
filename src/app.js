@@ -8,7 +8,7 @@ const usageRoutes = require("./routes/usageRoutes");
 const aiRoutes = require("./routes/aiRoutes");
 const usageSummaryRoutes = require("./routes/usageSummaryRoutes");
 const billingRoutes = require("./routes/billingRoutes");
-const testPaymentRoutes = require("./routes/testPaymentRoutes");
+
 const webhookRoutes = require("./routes/webhookRoutes");
 
 const app = express();
@@ -84,7 +84,7 @@ app.use(express.json());
 
 app.use(morgan("dev"));
 
-app.use("/api", testPaymentRoutes);
+
 
 app.get("/health", (req, res) => {
     res.status(200).json({

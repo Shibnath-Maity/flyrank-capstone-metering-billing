@@ -1,11 +1,12 @@
 const mongoose = require("mongoose");
 
-const usageCounterSchema = new mongoose.Schema(
+const monthlyUsageSchema = new mongoose.Schema(
     {
         tenantId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Tenant",
-            required: true
+            required: true,
+            index: true
         },
 
         month: {
@@ -15,31 +16,30 @@ const usageCounterSchema = new mongoose.Schema(
 
         apiCalls: {
             type: Number,
-            default: 0,
-            min: 0
+            default: 0
         },
 
         aiTokens: {
             type: Number,
-            default: 0,
-            min: 0
+            default: 0
+        },
+
+        aiCostInCents: {
+            type: Number,
+            default: 0
         }
     },
-    { timestamps: true }
-);
-
-// One usage counter per tenant per month
-usageCounterSchema.index(
     {
-        tenantId: 1,
-        month: 1
-    },
-    {
-        unique: true
+        timestamps: true
     }
 );
 
+monthlyUsageSchema.index(
+    { tenantId: 1, month: 1 },
+    { unique: true }
+);
+
 module.exports = mongoose.model(
-    "UsageCounter",
-    usageCounterSchema
+    "MonthlyUsage",
+    monthlyUsageSchema
 );

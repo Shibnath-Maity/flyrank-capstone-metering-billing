@@ -3,12 +3,13 @@ const Subscription = require("../models/Subscription");
 
 const getUsageSummary = async (req, res) => {
     try {
-        const { tenantId } = req.query;
+        // Tenant comes from authenticated API key
+        const tenantId = req.tenantId;
 
         if (!tenantId) {
-            return res.status(400).json({
+            return res.status(401).json({
                 success: false,
-                message: "tenantId is required"
+                message: "Tenant authentication required"
             });
         }
 
@@ -110,7 +111,7 @@ const getUsageSummary = async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
+        console.error("Usage summary error:", error);
 
         return res.status(500).json({
             success: false,

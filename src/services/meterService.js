@@ -4,6 +4,34 @@ const Subscription = require("../models/Subscription");
 const Plan = require("../models/Plan");
 const CostService = require("./costService");
 
+const USAGE_TYPE_FIELDS = {
+    API_CALL: {
+        limitField: "monthlyApiCalls",
+        counterField: "apiCalls"
+    },
+
+    AI_TOKENS: {
+        limitField: "monthlyAiTokens",
+        counterField: "aiTokens"
+    }
+};
+
+async function findExistingEvent(tenantId, idempotencyKey) {
+    return UsageEvent.findOne({
+        tenantId,
+        idempotencyKey
+    });
+}
+
+function getCurrentBillingMonth() {
+    const now = new Date();
+
+    return (
+        `${now.getUTCFullYear()}-` +
+        `${String(now.getUTCMonth() + 1).padStart(2, "0")}`
+    );
+}
+
 class MeterService {
     static async recordUsage({
         tenantId,
@@ -16,23 +44,54 @@ class MeterService {
         reasoningTokens = 0
     }) {
         // ------------------------------------------
-        // 1. Check idempotency first
+        // 1. Validate input
         // ------------------------------------------
-        const existingEvent = await UsageEvent.findOne({
+
+        const typeConfig = USAGE_TYPE_FIELDS[type];
+
+        if (!typeConfig) {
+            const error = new Error("Invalid usage type");
+            error.code = "INVALID_USAGE_TYPE";
+            error.statusCode = 400;
+            throw error;
+        }
+
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+            const error = new Error(
+                "quantity must be a positive number"
+            );
+
+            error.code = "INVALID_QUANTITY";
+            error.statusCode = 400;
+
+            throw error;
+        }
+
+        const {
+            limitField,
+            counterField
+        } = typeConfig;
+
+        // ------------------------------------------
+        // 2. Check idempotency first
+        // ------------------------------------------
+
+        const duplicateEvent = await findExistingEvent(
             tenantId,
             idempotencyKey
-        });
+        );
 
-        if (existingEvent) {
+        if (duplicateEvent) {
             return {
                 duplicate: true,
-                usageEvent: existingEvent
+                usageEvent: duplicateEvent
             };
         }
 
         // ------------------------------------------
-        // 2. Find active subscription
+        // 3. Find active subscription
         // ------------------------------------------
+
         const subscription = await Subscription.findOne({
             tenantId,
             status: "active"
@@ -40,56 +99,56 @@ class MeterService {
 
         if (!subscription) {
             const error = new Error("Payment required");
+
             error.code = "PAYMENT_REQUIRED";
             error.statusCode = 402;
+
             throw error;
         }
 
         // ------------------------------------------
-        // 3. Find plan
+        // 4. Find plan
         // ------------------------------------------
-        const plan = await Plan.findById(subscription.planId);
+
+        const plan = await Plan.findById(
+            subscription.planId
+        );
 
         if (!plan) {
-            throw new Error("Plan not found");
-        }
+            const error = new Error("Plan not found");
 
-        // ------------------------------------------
-        // 4. Validate usage type
-        // ------------------------------------------
-        let limitField;
-        let counterField;
+            error.code = "PLAN_NOT_FOUND";
+            error.statusCode = 500;
 
-        if (type === "API_CALL") {
-            limitField = "monthlyApiCalls";
-            counterField = "apiCalls";
-        } else if (type === "AI_TOKENS") {
-            limitField = "monthlyAiTokens";
-            counterField = "aiTokens";
-        } else {
-            throw new Error("Invalid usage type");
+            throw error;
         }
 
         const limit = plan[limitField];
 
+        if (!Number.isFinite(limit) || limit < 0) {
+            const error = new Error(
+                "Invalid plan quota"
+            );
+
+            error.code = "INVALID_PLAN_QUOTA";
+            error.statusCode = 500;
+
+            throw error;
+        }
+
         // ------------------------------------------
         // 5. Current billing month
         // ------------------------------------------
-        const now = new Date();
 
-        const month =
-            `${now.getUTCFullYear()}-` +
-            `${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+        const month = getCurrentBillingMonth();
 
         // ------------------------------------------
-        // 6a. Ensure the monthly UsageCounter exists
+        // 6. Ensure monthly counter exists
         //
-        // This upsert has NO quota logic in its filter -
-        // it only ever matches on { tenantId, month }, so
-        // it is always safe to upsert. $setOnInsert only
-        // applies when a new document is actually created,
-        // so an existing counter is left untouched.
+        // This operation only creates the counter
+        // when it does not already exist.
         // ------------------------------------------
+
         await UsageCounter.findOneAndUpdate(
             {
                 tenantId,
@@ -110,97 +169,107 @@ class MeterService {
         );
 
         // ------------------------------------------
-        // 6b. Atomically reserve quota
+        // 7. Atomically reserve quota
         //
-        // The counter document is now guaranteed to exist
-        // (from 6a), so this query can safely omit upsert.
-        // Do NOT add upsert here - combining upsert with an
-        // $expr quota-check filter is unsafe, since a
-        // non-matching filter (quota exceeded) combined with
-        // no existing document would cause Mongo to create a
-        // new, incorrect document instead of returning null.
+        // The quota condition and increment happen
+        // atomically on the same MongoDB document.
         // ------------------------------------------
-        const counter = await UsageCounter.findOneAndUpdate(
-            {
-                tenantId,
-                month,
 
-                $expr: {
-                    $lte: [
-                        {
-                            $add: [
-                                `$${counterField}`,
-                                quantity
-                            ]
-                        },
-                        limit
-                    ]
+        const counter =
+            await UsageCounter.findOneAndUpdate(
+                {
+                    tenantId,
+                    month,
+
+                    $expr: {
+                        $lte: [
+                            {
+                                $add: [
+                                    `$${counterField}`,
+                                    quantity
+                                ]
+                            },
+                            limit
+                        ]
+                    }
+                },
+                {
+                    $inc: {
+                        [counterField]: quantity
+                    }
+                },
+                {
+                    new: true
                 }
-            },
-            {
-                $inc: {
-                    [counterField]: quantity
-                }
-            },
-            {
-                new: true
+            );
+
+        // ------------------------------------------
+        // 8. Quota reservation failed
+        //
+        // Before returning 429, check whether another
+        // concurrent request with the same idempotency
+        // key already created the event.
+        // ------------------------------------------
+
+        if (!counter) {
+            const concurrentEvent =
+                await findExistingEvent(
+                    tenantId,
+                    idempotencyKey
+                );
+
+            if (concurrentEvent) {
+                return {
+                    duplicate: true,
+                    usageEvent: concurrentEvent
+                };
             }
-        );
 
-        // ------------------------------------------
-        // 7. If quota could not be reserved
-        // ------------------------------------------
-      
-// 7. If quota could not be reserved,
-// check whether another concurrent request with the
-// same idempotency key already completed the request.
-if (!counter) {
-    const existingEvent = await UsageEvent.findOne({
-        tenantId,
-        idempotencyKey
-    });
+            const error = new Error(
+                "Usage quota exceeded"
+            );
 
-    if (existingEvent) {
-        return {
-            duplicate: true,
-            usageEvent: existingEvent
-        };
-    }
+            error.code = "QUOTA_EXCEEDED";
+            error.statusCode = 429;
 
-    const error = new Error("Usage quota exceeded");
-    error.code = "QUOTA_EXCEEDED";
-    error.statusCode = 429;
-    throw error;
-}
-        // ------------------------------------------
-        // 8. Calculate AI cost
-        // ------------------------------------------
-        let costInCents = 0;
-
-        if (type === "AI_TOKENS") {
-            costInCents = CostService.calculateAITokenCost({
-                inputTokens,
-                cachedInputTokens,
-                outputTokens,
-                reasoningTokens
-            });
+            throw error;
         }
 
         // ------------------------------------------
-        // 9. Create detailed usage event
+        // 9. Calculate AI cost
         // ------------------------------------------
+
+        let costInCents = 0;
+
+        if (type === "AI_TOKENS") {
+            costInCents =
+                CostService.calculateAITokenCost({
+                    inputTokens,
+                    cachedInputTokens,
+                    outputTokens,
+                    reasoningTokens
+                });
+        }
+
+        // ------------------------------------------
+        // 10. Create detailed usage event
+        // ------------------------------------------
+
         try {
-            const usageEvent = await UsageEvent.create({
-                tenantId,
-                type,
-                quantity,
-                idempotencyKey,
-                inputTokens,
-                cachedInputTokens,
-                outputTokens,
-                reasoningTokens,
-                costInCents
-            });
+            const usageEvent =
+                await UsageEvent.create({
+                    tenantId,
+                    type,
+                    quantity,
+                    idempotencyKey,
+
+                    inputTokens,
+                    cachedInputTokens,
+                    outputTokens,
+                    reasoningTokens,
+
+                    costInCents
+                });
 
             return {
                 duplicate: false,
@@ -209,12 +278,14 @@ if (!counter) {
 
         } catch (error) {
 
-            // Duplicate idempotency request
+            // ------------------------------------------
+            // 11. Duplicate idempotency request
+            // ------------------------------------------
+
             if (error.code === 11000) {
 
-                // IMPORTANT:
                 // Release the quota reservation because
-                // this request was already processed.
+                // another request already recorded this event.
                 await UsageCounter.findOneAndUpdate(
                     {
                         tenantId,
@@ -227,10 +298,11 @@ if (!counter) {
                     }
                 );
 
-                const existingEvent = await UsageEvent.findOne({
-                    tenantId,
-                    idempotencyKey
-                });
+                const existingEvent =
+                    await findExistingEvent(
+                        tenantId,
+                        idempotencyKey
+                    );
 
                 return {
                     duplicate: true,
@@ -238,8 +310,10 @@ if (!counter) {
                 };
             }
 
-            // If event creation failed for another reason,
-            // release the reserved quota.
+            // ------------------------------------------
+            // 12. Roll back quota for other failures
+            // ------------------------------------------
+
             await UsageCounter.findOneAndUpdate(
                 {
                     tenantId,
